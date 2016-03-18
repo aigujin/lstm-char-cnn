@@ -348,7 +348,7 @@ function feval(x)
     end
     ------------------ get minibatch -------------------
     local x, y, x_char = loader:next_batch(1) --from train
-    if opt.gpuid >= 0 opt.opencl == 0 then -- ship the input arrays to GPU
+    if opt.gpuid >= 0 and opt.opencl == 0 then -- ship the input arrays to GPU
         -- have to convert to float because integers can't be cuda()'d
         x = x:float():cuda()
         y = y:float():cuda()
