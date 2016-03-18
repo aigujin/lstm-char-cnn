@@ -59,6 +59,7 @@ cmd:option('-time', 0, 'print batch times')
 -- GPU/CPU
 cmd:option('-gpuid', -1,'which gpu to use. -1 = use CPU')
 cmd:option('-cudnn', 0,'use cudnn (1=yes). this should greatly speed up convolutions')
+cmd:option('-opencl',0,'use OpenCL (instead of CUDA)')
 cmd:text()
 
 -- parse input params
@@ -81,7 +82,7 @@ opt.tokens.START = '{' -- start-of-word token
 opt.tokens.END = '}' -- end-of-word token
 opt.tokens.ZEROPAD = ' ' -- zero-pad token 
 
--- load necessary packages depending on config options
+--[[ load necessary packages depending on config options
 if opt.gpuid >= 0 then
     print('using CUDA on GPU ' .. opt.gpuid .. '...')
     require 'cutorch'
@@ -93,6 +94,43 @@ if opt.cudnn == 1 then
    assert(opt.gpuid >= 0, 'GPU must be used if using cudnn')
    print('using cudnn...')
    require 'cudnn'
+end
+]]--
+
+-- initialize cunn/cutorch for training on the GPU and fall back to CPU gracefully
+if opt.gpuid >= 0 and opt.opencl == 0 then
+    local ok, cunn = pcall(require, 'cunn')
+    local ok2, cutorch = pcall(require, 'cutorch')
+    if not ok then print('package cunn not found!') end
+    if not ok2 then print('package cutorch not found!') end
+    if ok and ok2 then
+        print('using CUDA on GPU ' .. opt.gpuid .. '...')
+        cutorch.setDevice(opt.gpuid + 1) -- note +1 to make it 0 indexed! sigh lua
+        cutorch.manualSeed(opt.seed)
+    else
+        print('If cutorch and cunn are installed, your CUDA toolkit may be improperly configured.')
+        print('Check your CUDA toolkit installation, rebuild cutorch and cunn, and try again.')
+        print('Falling back on CPU mode')
+        opt.gpuid = -1 -- overwrite user setting
+    end
+end
+
+-- initialize clnn/cltorch for training on the GPU and fall back to CPU gracefully
+if opt.gpuid >= 0 and opt.opencl == 1 then
+    local ok, cunn = pcall(require, 'clnn')
+    local ok2, cutorch = pcall(require, 'cltorch')
+    if not ok then print('package clnn not found!') end
+    if not ok2 then print('package cltorch not found!') end
+    if ok and ok2 then
+        print('using OpenCL on GPU ' .. opt.gpuid .. '...')
+        cltorch.setDevice(opt.gpuid + 1) -- note +1 to make it 0 indexed! sigh lua
+        torch.manualSeed(opt.seed)
+    else
+        print('If cltorch and clnn are installed, your OpenCL driver may be improperly configured.')
+        print('Check your OpenCL driver installation, check output of clinfo command, and try again.')
+        print('Falling back on CPU mode')
+        opt.gpuid = -1 -- overwrite user setting
+    end
 end
 
 -- create the data loader class
@@ -162,14 +200,18 @@ end
 init_state = {}
 for L=1,opt.num_layers do
     local h_init = torch.zeros(opt.batch_size, opt.rnn_size)
-    if opt.gpuid >=0 then h_init = h_init:cuda() end
+    if opt.gpuid >=0 and opt.opencl == 0 then h_init = h_init:cuda() end
+    if opt.gpuid >=0 and opt.opencl == 1 then h_init = h_init:cl() end
     table.insert(init_state, h_init:clone())
     table.insert(init_state, h_init:clone())
 end
 
 -- ship the model to the GPU if desired
-if opt.gpuid >= 0 then
+if opt.gpuid >= 0 and opt.opencl == 0 then
     for k,v in pairs(protos) do v:cuda() end
+end
+if opt.gpuid >= 0 and opt.opencl == 1 then
+    for k,v in pairs(protos) do v:cl() end
 end
 
 -- put the above things into one flattened parameters tensor
@@ -236,12 +278,17 @@ function eval_split(split_idx, max_batches)
 	for i = 1,n do -- iterate over batches in the split
 	    -- fetch a batch
 	    local x, y, x_char = loader:next_batch(split_idx)
-	    if opt.gpuid >= 0 then -- ship the input arrays to GPU
+	    if opt.gpuid >= 0 and opt.opencl == 0 then -- ship the input arrays to GPU
 		-- have to convert to float because integers can't be cuda()'d
 		x = x:float():cuda()
 		y = y:float():cuda()
 		x_char = x_char:float():cuda()
 	    end
+	    if opt.gpuid >= 0 and opt.opencl == 1 then -- ship the input arrays to GPU
+        	x = x:cl()
+        	y = y:cl()
+        	x_char = x_char:cl()
+    	     end
 	    -- forward pass
 	    for t=1,opt.seq_length do
 		clones.rnn[t]:evaluate() -- for dropout proper functioning
@@ -260,12 +307,17 @@ function eval_split(split_idx, max_batches)
     else -- full eval on test set
         local token_perp = torch.zeros(#loader.idx2word, 2) 
         local x, y, x_char = loader:next_batch(split_idx)
-	if opt.gpuid >= 0 then -- ship the input arrays to GPU
+	if opt.gpuid >= 0 and opt.opencl == 0 then -- ship the input arrays to GPU
 	    -- have to convert to float because integers can't be cuda()'d
 	    x = x:float():cuda()
 	    y = y:float():cuda()
 	    x_char = x_char:float():cuda()
 	end
+	if opt.gpuid >= 0 and opt.opencl == 1 then -- ship the input arrays to GPU
+        	x = x:cl()
+        	y = y:cl()
+        	x_char = x_char:cl()
+    	end
 	protos.rnn:evaluate() -- just need one clone
 	for t = 1, x:size(2) do
 	    local lst = protos.rnn:forward(get_input(x, x_char, t, rnn_state[0]))
@@ -296,12 +348,17 @@ function feval(x)
     end
     ------------------ get minibatch -------------------
     local x, y, x_char = loader:next_batch(1) --from train
-    if opt.gpuid >= 0 then -- ship the input arrays to GPU
+    if opt.gpuid >= 0 opt.opencl == 0 then -- ship the input arrays to GPU
         -- have to convert to float because integers can't be cuda()'d
         x = x:float():cuda()
         y = y:float():cuda()
 	x_char = x_char:float():cuda()
     end
+    if opt.gpuid >= 0 and opt.opencl == 1 then -- ship the input arrays to GPU
+        	x = x:cl()
+        	y = y:cl()
+        	x_char = x_char:cl()
+    	end
     ------------------- forward pass -------------------
     local rnn_state = {[0] = init_state_global}
     local predictions = {}           -- softmax outputs
