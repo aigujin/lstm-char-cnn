@@ -29,11 +29,44 @@ cmd:option('-model', 'en-large-word-model.t7', 'model checkpoint file')
 -- GPU/CPU these params must be passed in because it affects the constructors
 cmd:option('-gpuid', -1,'which gpu to use. -1 = use CPU')
 cmd:option('-cudnn', 0,'use cudnn (1 = yes, 0 = no)')
+cmd:option('-opencl',0,'use OpenCL (instead of CUDA)')
 
 cmd:text()
 
 -- parse input params
 opt2 = cmd:parse(arg)
+
+if opt2.gpuid >= 0 and opt2.opencl == 0 then
+    local ok, cunn = pcall(require, 'cunn')
+    local ok2, cutorch = pcall(require, 'cutorch')
+    if not ok then print('package cunn not found!') end
+    if not ok2 then print('package cutorch not found!') end
+    if ok and ok2 then
+        print('using CUDA on GPU ' .. opt.gpuid .. '...')
+        cutorch.setDevice(opt2.gpuid + 1) -- note +1 to make it 0 indexed! sigh lua
+    else
+        print('If cutorch and cunn are installed, your CUDA toolkit may be improperly configured.')
+        print('Check your CUDA toolkit installation, rebuild cutorch and cunn, and try again.')
+        print('Falling back on CPU mode')
+        opt2.gpuid = -1 -- overwrite user setting
+    end
+end
+if opt2.gpuid >= 0 and opt2.opencl == 1 then
+    local ok, cunn = pcall(require, 'clnn')
+    local ok2, cutorch = pcall(require, 'cltorch')
+    if not ok then print('package clnn not found!') end
+    if not ok2 then print('package cltorch not found!') end
+    if ok and ok2 then
+        print('using OpenCL on GPU ' .. opt.gpuid .. '...')
+        cltorch.setDevice(opt2.gpuid + 1) -- note +1 to make it 0 indexed! sigh lua
+    else
+        print('If cltorch and clnn are installed, your OpenCL driver may be improperly configured.')
+        print('Check your OpenCL driver installation, check output of clinfo command, and try again.')
+        print('Falling back on CPU mode')
+        opt2.gpuid = -1 -- overwrite user setting
+    end
+end
+--[[
 if opt2.gpuid >= 0 then
     print('using CUDA on GPU ' .. opt2.gpuid .. '...')
     require 'cutorch'
@@ -46,7 +79,7 @@ if opt2.cudnn == 1 then
     print('using cudnn')
     require 'cudnn'
 end
-
+]]--
 HighwayMLP = require 'model.HighwayMLP'
 TDNN = require 'model.TDNN'
 LSTMTDNN = require 'model.LSTMTDNN'
@@ -68,15 +101,19 @@ print('Word vocab size: ' .. #loader.idx2word .. ', Char vocab size: ' .. #loade
 -- the initial state of the cell/hidden states
 init_state = {}
 for L=1,opt.num_layers do
-    local h_init = torch.zeros(2, opt.rnn_size)
-    if opt.gpuid >=0 then h_init = h_init:cuda() end
+    local h_init = torch.zeros(opt.batch_size, opt.rnn_size)
+    if opt.gpuid >=0 and opt.opencl == 0 then h_init = h_init:cuda() end
+    if opt.gpuid >=0 and opt.opencl == 1 then h_init = h_init:cl() end
     table.insert(init_state, h_init:clone())
     table.insert(init_state, h_init:clone())
+    end
 end
 
--- ship the model to the GPU if desired
-if opt.gpuid >= 0 then
+if opt.gpuid >= 0 and opt.opencl == 0 then
     for k,v in pairs(protos) do v:cuda() end
+end
+if opt.gpuid >= 0 and opt.opencl == 1 then
+    for k,v in pairs(protos) do v:cl() end
 end
 
 params, grad_params = model_utils.combine_all_parameters(protos.rnn)
@@ -113,10 +150,15 @@ function eval_split_full(split_idx)
     local token_loss = torch.zeros(#idx2word)
     local rnn_state = {[0] = init_state}    
     local x, y, x_char = loader:next_batch(split_idx)
-    if opt.gpuid >= 0 then
+    if opt.gpuid >= 0 and opt.opencl == 0 then
         x = x:float():cuda()
 	y = y:float():cuda()
 	x_char = x_char:float():cuda()
+    end
+    if opt.gpuid >= 0 and opt.opencl == 1 then -- ship the input arrays to GPU
+        x = x:cl()
+        y = y:cl()
+        x_char = x_char:cl()
     end
     protos.rnn:evaluate() 
     for t = 1, x:size(2) do
